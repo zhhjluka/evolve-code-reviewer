@@ -21,7 +21,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .gate import run_gate, format_gate_result
+from .gate import run_gate, format_gate_result, load_gate_config
 from .evolver import (
     EvolutionInput,
     EvolutionResult,
