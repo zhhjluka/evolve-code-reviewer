@@ -47,15 +47,25 @@ class EvolutionInput:
 class EvolutionResult:
     """一次进化任务的输出"""
     success: bool
+    # 复杂度
     original_complexity: float
     evolved_complexity: float
-    original_lines: int
-    evolved_lines: int
-    original_perf_ms: float     # 原始代码平均执行时间 (ms)
-    evolved_perf_ms: float      # 进化后代码平均执行时间 (ms)
+    original_complexity_detail: dict = field(default_factory=dict)
+    evolved_complexity_detail: dict = field(default_factory=dict)
+    # 代码量
+    original_lines: int = 0
+    evolved_lines: int = 0
+    # 性能
+    original_perf: dict = field(default_factory=dict)    # {median_ms, mean_ms, p95_ms}
+    evolved_perf: dict = field(default_factory=dict)
+    # 产物
     diff: str = ""
     evolved_code: str = ""
     error: str = ""
+    # 统计
+    elapsed_s: float = 0.0
+    generations: int = 0
+    estimated_cost_usd: float = 0.0
 
 
 @dataclass
@@ -108,34 +118,72 @@ def _replace_block(source: str, new_code: str,
 
 
 def _measure_complexity(source: str) -> float:
-    """测量代码的圈复杂度（取所有函数的最大值）"""
+    """测量代码的最大圈复杂度"""
     try:
-        import radon.complexity as rcomp
         from radon.visitors import ComplexityVisitor
     except ImportError:
         return -1.0
-
     visitor = ComplexityVisitor.from_code(source)
     if not visitor.functions:
         return 1.0
     return max(f.complexity for f in visitor.functions)
 
 
+def _measure_complexity_detail(source: str) -> dict:
+    """测量代码的详细复杂度（每个函数）"""
+    try:
+        from radon.visitors import ComplexityVisitor
+    except ImportError:
+        return {"max": -1.0, "avg": -1.0, "functions": []}
+    visitor = ComplexityVisitor.from_code(source)
+    funcs = [{"name": f.name, "complexity": f.complexity, "line": f.lineno}
+             for f in visitor.functions]
+    if not funcs:
+        return {"max": 1.0, "avg": 1.0, "functions": []}
+    return {
+        "max": max(f["complexity"] for f in funcs),
+        "avg": sum(f["complexity"] for f in funcs) / len(funcs),
+        "functions": funcs,
+    }
+
+
 def _measure_lines(source: str) -> int:
-    """计算代码行数（去除空行和注释行）"""
+    """计算有效代码行数（去除空行和注释行）"""
     lines = [l for l in source.split("\n") if l.strip() and not l.strip().startswith("#")]
     return len(lines)
 
 
-def _measure_performance(test_file: str, iterations: int = 100) -> float:
-    """运行 pytest benchmark 测量执行时间（毫秒）"""
-    start = time.perf_counter()
+def _measure_performance(test_file: str, warmup: int = 3, iterations: int = 20) -> dict:
+    """运行 pytest 测量执行时间，返回 {median_ms, mean_ms, p95_ms}"""
+    times = []
+    cwd = str(Path(test_file).parent)
+
+    # 预热
+    for _ in range(warmup):
+        subprocess.run(
+            [sys.executable, "-m", "pytest", test_file, "-q", "--no-header", "--tb=no"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+
+    # 正式测量
     for _ in range(iterations):
+        t0 = time.perf_counter()
         result = subprocess.run(
             [sys.executable, "-m", "pytest", test_file, "-q", "--no-header", "--tb=no"],
-            capture_output=True, text=True,
-            cwd=str(Path(test_file).parent),
+            capture_output=True, text=True, cwd=cwd,
         )
+        elapsed = (time.perf_counter() - t0) * 1000  # ms
+        times.append(elapsed)
+
+    times.sort()
+    n = len(times)
+    return {
+        "median_ms": times[n // 2],
+        "mean_ms": sum(times) / n,
+        "p95_ms": times[int(n * 0.95)],
+        "min_ms": times[0],
+        "max_ms": times[-1],
+    }
     elapsed = time.perf_counter() - start
     return (elapsed / iterations) * 1000  # ms per run
 
@@ -244,8 +292,6 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
         return EvolutionResult(
             success=False,
             original_complexity=0, evolved_complexity=0,
-            original_lines=0, evolved_lines=0,
-            original_perf_ms=0.0, evolved_perf_ms=0.0,
             error=f"Source file not found: {input.source_file}"
         )
 
@@ -255,6 +301,7 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
 
     # 测量原始指标
     original_complexity = _measure_complexity(original_source)
+    original_complexity_detail = _measure_complexity_detail(original_source)
     original_lines = _measure_lines(original_source)
     original_perf = _measure_performance(str(test_path))
 
@@ -294,16 +341,16 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
             # 测量指标
             complexity = _measure_complexity(code)
             lines = _measure_lines(code)
-            perf = _measure_performance(str(test_dest), iterations=10)
+            perf = _measure_performance(str(test_dest), warmup=1, iterations=5)  # 评估时轻量测量
 
             return EvalResult(
                 metrics={
-                    "complexity": -complexity,  # 负值（MAP-Elites 做最大化）
-                    "performance": -perf,       # 负值（越小越好）
+                    "complexity": -complexity,
+                    "performance": -perf["median_ms"],
                     "lines": lines,
                 },
                 artifacts={
-                    "profiling_data": f"perf={perf:.2f}ms, complexity={complexity}",
+                    "profiling_data": f"perf={perf['median_ms']:.1f}ms, complexity={complexity}, lines={lines}",
                     "test_output": output[-300:],
                 },
             )
@@ -349,10 +396,11 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
         # 读取进化后的代码
         evolved_source = Path(str(best_program)).read_text() if best_program else initial_code
 
-        # 测量进化后指标
+        # 测量进化后指标（完整采样）
         evolved_complexity = _measure_complexity(evolved_source)
+        evolved_complexity_detail = _measure_complexity_detail(evolved_source)
         evolved_lines = _measure_lines(evolved_source)
-        evolved_perf = _measure_performance(str(test_dest), iterations=10)
+        evolved_perf = _measure_performance(str(test_dest), warmup=3, iterations=20)
 
         # 生成 diff
         import difflib
@@ -364,16 +412,25 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
             lineterm="",
         ))
 
+        # 成本估算（按 Gemini Flash 价格: $0.075/1M input, $0.30/1M output）
+        total_chars = len(original_source) * input.max_iterations * 3  # rough estimate
+        estimated_cost = total_chars / 1_000_000 * 0.10
+
         return EvolutionResult(
             success=True,
             original_complexity=original_complexity,
             evolved_complexity=evolved_complexity,
+            original_complexity_detail=original_complexity_detail,
+            evolved_complexity_detail=evolved_complexity_detail,
             original_lines=original_lines,
             evolved_lines=evolved_lines,
-            original_perf_ms=original_perf,
-            evolved_perf_ms=evolved_perf,
+            original_perf=original_perf,
+            evolved_perf=evolved_perf,
             diff=diff,
             evolved_code=evolved_source,
+            elapsed_s=elapsed,
+            generations=input.max_iterations,
+            estimated_cost_usd=estimated_cost,
         )
 
     except Exception as e:
@@ -381,10 +438,7 @@ def evolve_code(input: EvolutionInput) -> EvolutionResult:
             success=False,
             original_complexity=original_complexity,
             evolved_complexity=0,
-            original_lines=original_lines,
-            evolved_lines=0,
-            original_perf_ms=original_perf,
-            evolved_perf_ms=0.0,
+            original_complexity_detail=original_complexity_detail,
             error=f"Evolution failed: {str(e)}",
         )
     finally:
@@ -405,18 +459,33 @@ def format_evolution_report(report: EvolutionReport) -> str:
         # 复杂度变化
         comp_delta = result.evolved_complexity - result.original_complexity
         comp_arrow = "⬆️" if comp_delta > 0 else "⬇️"
-        lines.append(f"  Complexity: {result.original_complexity:.1f} → {result.evolved_complexity:.1f} ({comp_arrow} {abs(comp_delta):.1f})")
+        lines.append(f"  Max Complexity: {result.original_complexity:.1f} → {result.evolved_complexity:.1f} ({comp_arrow} {abs(comp_delta):.1f})")
+
+        # 平均复杂度
+        if result.evolved_complexity_detail:
+            orig_avg = result.original_complexity_detail.get("avg", 0)
+            evo_avg = result.evolved_complexity_detail.get("avg", 0)
+            if orig_avg and evo_avg:
+                lines.append(f"  Avg Complexity: {orig_avg:.1f} → {evo_avg:.1f}")
 
         # 行数变化
         line_delta = result.evolved_lines - result.original_lines
         line_arrow = "⬆️" if line_delta > 0 else "⬇️"
-        lines.append(f"  Lines:      {result.original_lines} → {result.evolved_lines} ({line_arrow} {abs(line_delta)})")
+        lines.append(f"  Lines:          {result.original_lines} → {result.evolved_lines} ({line_arrow} {abs(line_delta)})")
 
-        # 性能变化
-        if result.original_perf_ms > 0 and result.evolved_perf_ms > 0:
-            perf_change = ((result.evolved_perf_ms - result.original_perf_ms) / result.original_perf_ms) * 100
+        # 性能变化（中位数）
+        orig_median = result.original_perf.get("median_ms", 0) if result.original_perf else 0
+        evo_median = result.evolved_perf.get("median_ms", 0) if result.evolved_perf else 0
+        if orig_median > 0 and evo_median > 0:
+            perf_change = ((evo_median - orig_median) / orig_median) * 100
             perf_arrow = "⬆️ faster" if perf_change < 0 else "⬇️ slower"
-            lines.append(f"  Perf:       {result.original_perf_ms:.2f}ms → {result.evolved_perf_ms:.2f}ms ({perf_arrow} {abs(perf_change):.1f}%)")
+            lines.append(f"  Perf (median):  {orig_median:.2f}ms → {evo_median:.2f}ms ({perf_arrow} {abs(perf_change):.1f}%)")
+
+        # 耗时 + 成本
+        if result.elapsed_s > 0:
+            lines.append(f"  Time:           {result.elapsed_s:.1f}s")
+        if result.estimated_cost_usd > 0:
+            lines.append(f"  Est. Cost:      ~${result.estimated_cost_usd:.2f}")
 
         lines.append("")
 
