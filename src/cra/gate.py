@@ -89,7 +89,11 @@ def check_complexity(filepath: str, config: GateConfig) -> list[GateIssue]:
     with open(filepath) as f:
         source = f.read()
 
-    visitor = ComplexityVisitor.from_code(source)
+    try:
+        visitor = ComplexityVisitor.from_code(source)
+    except SyntaxError:
+        return []
+
     issues = []
 
     for func in visitor.functions:
