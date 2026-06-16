@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cra"
+version = "0.1.0"
+description = "Code Review Agent — AI-powered code review with OpenEvolve code optimization"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Code Review Team"}]
+dependencies = [
+    "openevolve>=0.1.0",
+    "radon>=6.0",
+    "bandit>=1.7",
+    "litellm>=1.0",
+    "typer>=0.9",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.1",
+    "pre-commit>=3.0",
+]
+
+[project.scripts]
+cra = "cra.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

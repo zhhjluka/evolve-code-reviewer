@@ -1,0 +1,43 @@
+# Code Review Agent 配置文件
+# 放在仓库根目录: .code-review.yaml
+
+# ── 静态门控阈值 ──────────────────────────────────
+gate:
+  complexity_threshold: 15    # 圈复杂度阈值
+  cognitive_threshold: 20     # 认知复杂度阈值（暂未启用）
+  max_function_lines: 80      # 函数最大行数
+
+# ── 进化配置 ─────────────────────────────────────
+evolve:
+  enabled: true               # 设为 false 则只跑门控，不进化
+  iterations: 200             # OpenEvolve 迭代次数（CI 中建议 50-100）
+  timeout_minutes: 10         # 进化超时时间
+
+# ── 文件 → 测试映射（进化必需）─────────────────────
+# 只有在此处列出映射的文件才会触发代码进化。
+# 未列出的文件只做静态门控检查。
+# 路径相对于仓库根目录。
+file_mapping:
+  # 格式: "源文件路径": "对应的 pytest 测试文件路径"
+  "src/payment/processor.py": "tests/test_payment_processor.py"
+  "src/order/handler.py": "tests/test_order_handler.py"
+  "src/utils/calculator.py": "tests/test_calculator.py"
+
+# ── 排除规则 ─────────────────────────────────────
+exclude:
+  paths:
+    - "tests/**"          # 不审查测试文件
+    - "migrations/**"     # 不审查数据库迁移
+    - "**/__init__.py"    # 不审查空 init 文件
+    - "docs/**"           # 不审查文档
+    - "*.md"
+    - "*.yaml"
+    - "*.yml"
+    - "*.json"
+
+# ── LLM 配置 ─────────────────────────────────────
+# GitHub Secrets 中设置: GEMINI_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY
+# llm:
+#   provider: "gemini"        # 手动指定，默认自动检测
+#   model: "gemini-2.5-flash"
+#   model_secondary: "gemini-2.5-pro"
