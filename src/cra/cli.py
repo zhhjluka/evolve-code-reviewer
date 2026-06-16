@@ -192,5 +192,84 @@ def review(
         raise typer.Exit(1)
 
 
+@app.command()
+def bench(
+    source: str = typer.Argument(..., help="Source file with EVOLVE-BLOCK markers"),
+    test: str = typer.Option(..., "--test", "-t", help="pytest test file"),
+    iterations: int = typer.Option(200, "--iterations", "-n", help="OpenEvolve iterations"),
+    output_dir: str = typer.Option("bench_results", "--output-dir", "-d", help="Bench results directory"),
+):
+    """
+    Run evolution benchmark and save detailed metrics as JSON.
+
+    Outputs a JSON file in --output-dir with:
+    - Before/after complexity (max + avg + per-function)
+    - Before/after performance (median/mean/p95)
+    - Before/after line count
+    - Diff, elapsed time, and cost estimate
+    """
+    from .bench import run_bench, save_bench
+
+    console.print(f"[bold]Benchmarking: {Path(source).name}[/bold]")
+    console.print(f"Tests:         {Path(test).name}")
+    console.print(f"Iterations:    {iterations}")
+    provider = _detect_provider()
+    models = _PRESET_MODELS[provider]
+    console.print(f"LLM:           [cyan]{provider}[/cyan] ({models[0]} + {models[1]})")
+    console.print()
+
+    bench_data = run_bench(source, test, iterations)
+    filepath = save_bench(bench_data, output_dir)
+
+    s = bench_data["summary"]
+    console.print("[bold green]✅ Benchmark complete![/bold green]")
+    console.print(f"   Success:       {'✅' if s['success'] else '❌'}")
+    if s["success"]:
+        console.print(f"   Complexity:    {s['complexity_change']:+.1f}")
+        console.print(f"   Lines:         {s['lines_change']:+d}")
+        if s["perf_change_pct"] is not None:
+            console.print(f"   Perf:          {s['perf_change_pct']:+.1f}%")
+        console.print(f"   Cost:          ~${s['estimated_cost_usd']:.2f}")
+    console.print(f"   Time:          {s['elapsed_s']:.1f}s")
+    console.print(f"\n📄 Results saved to: {filepath}")
+
+
+@app.command()
+def diff(
+    source: str = typer.Argument(..., help="Original file"),
+    evolved: str = typer.Argument(..., help="Evolved file (from --output)"),
+):
+    """
+    Show a side-by-side diff between original and evolved code.
+    """
+    from difflib import unified_diff
+
+    src_path = Path(source).resolve()
+    evo_path = Path(evolved).resolve()
+
+    if not src_path.exists():
+        console.print(f"[red]Original file not found: {source}[/red]")
+        raise typer.Exit(1)
+    if not evo_path.exists():
+        console.print(f"[red]Evolved file not found: {evolved}[/red]")
+        raise typer.Exit(1)
+
+    src_lines = src_path.read_text().splitlines()
+    evo_lines = evo_path.read_text().splitlines()
+
+    diff_output = "\n".join(unified_diff(
+        src_lines, evo_lines,
+        fromfile=f"a/{src_path.name}",
+        tofile=f"b/{evo_path.name}",
+        lineterm="",
+    ))
+
+    if diff_output:
+        console.print("[bold]Diff:[/bold]")
+        console.print(diff_output)
+    else:
+        console.print("[yellow]No differences found.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
